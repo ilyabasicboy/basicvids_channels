@@ -1,0 +1,38 @@
+services:
+  basicvids_channels:
+    image: ilyabasicboy/basicvids-channels:latest
+    build: .
+    container_name: basicvids_channels
+    volumes:
+      - ${DATA_PATH:-./data}:/basicvids_channels/data
+    extra_hosts:
+    - "${CUSTOM_HOST:-host.docker.internal}:host-gateway"
+    environment:
+      PYTHONDONTWRITEBYTECODE: 1
+      PYTHONUNBUFFERED: 1
+      REDIS_URL: redis://basicvids_redis:6379/5
+    entrypoint: ["/basicvids_channels/entrypoint.sh"]
+    expose:
+      - "8000"
+    networks:
+      - basicvids
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    restart: unless-stopped
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  basicvids:
+    external: true
+    name: basicvids
