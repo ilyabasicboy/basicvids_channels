@@ -23,6 +23,9 @@ from basicvids_channels.models.channels import (
     DeleteResponse,
     SubscriptionList,
     SubscriptionPublic,
+    VideoChannelPublic,
+    VideoChannelsRequest,
+    VideoChannelsResponse,
 )
 from basicvids_channels.rate_limit import client_identifier, enforce_rate_limit
 from basicvids_channels.schemas.channels import (
@@ -213,6 +216,42 @@ async def list_my_subscriptions(
     return SubscriptionList(
         subscriptions=[SubscriptionPublic.model_validate(item) for item in subscriptions],
         count=len(subscriptions),
+    )
+
+
+@router.get("/videos/{video_id}/channel", response_model=ChannelPublic)
+async def get_channel_by_video(
+    video_id: str,
+    session: Session = Depends(get_session),
+) -> ChannelPublic:
+    channel_video = session.exec(select(ChannelVideo).where(ChannelVideo.video_id == video_id)).first()
+    if not channel_video:
+        raise HTTPException(status_code=404, detail="Video channel not found")
+
+    channel = get_channel_or_404(session, channel_video.channel_id)
+    return channel_to_public(session, channel)
+
+
+@router.post("/videos/channels", response_model=VideoChannelsResponse)
+async def get_channels_by_videos(
+    data: VideoChannelsRequest,
+    session: Session = Depends(get_session),
+) -> VideoChannelsResponse:
+    video_ids = list(dict.fromkeys([video_id for video_id in data.video_ids if video_id]))
+    if not video_ids:
+        return VideoChannelsResponse(items=[])
+
+    channel_videos = session.exec(select(ChannelVideo).where(col(ChannelVideo.video_id).in_(video_ids))).all()
+    channel_ids = list(dict.fromkeys([item.channel_id for item in channel_videos]))
+    channels = session.exec(select(Channel).where(col(Channel.id).in_(channel_ids))).all() if channel_ids else []
+    channels_by_id = {channel.id: channel_to_public(session, channel) for channel in channels}
+
+    return VideoChannelsResponse(
+        items=[
+            VideoChannelPublic(video_id=item.video_id, channel=channels_by_id[item.channel_id])
+            for item in channel_videos
+            if item.channel_id in channels_by_id
+        ],
     )
 
 

@@ -39,6 +39,19 @@ class ChannelList(BaseModel):
     count: int
 
 
+class VideoChannelsRequest(BaseModel):
+    video_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class VideoChannelPublic(BaseModel):
+    video_id: str
+    channel: ChannelPublic
+
+
+class VideoChannelsResponse(BaseModel):
+    items: list[VideoChannelPublic]
+
+
 class SubscriptionPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
