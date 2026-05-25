@@ -34,6 +34,16 @@ class ChannelPublic(BaseModel):
     updated_at: datetime
 
 
+class ChannelAvatarPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    channel_id: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class ChannelList(BaseModel):
     channels: list[ChannelPublic]
     count: int

@@ -1,6 +1,10 @@
 import re
+from pathlib import Path
+from typing import Annotated
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import Response
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, delete, select
@@ -10,6 +14,7 @@ from basicvids_channels.db import get_session
 from basicvids_channels.models.channels import (
     ChannelChange,
     ChannelCreate,
+    ChannelAvatarPublic,
     ChannelList,
     ChannelPlaylistChange,
     ChannelPlaylistCreate,
@@ -30,16 +35,22 @@ from basicvids_channels.models.channels import (
 from basicvids_channels.rate_limit import client_identifier, enforce_rate_limit
 from basicvids_channels.schemas.channels import (
     Channel,
+    ChannelAvatar,
     ChannelPlaylist,
     ChannelPlaylistItem,
     ChannelSubscription,
     ChannelVideo,
     utc_now,
 )
+from basicvids_channels.settings import settings
 
 
 router = APIRouter(tags=["Channels"], prefix="/channels")
 SLUG_PATTERN = re.compile(r"[^a-z0-9-]+")
+DEFAULT_CHANNEL_AVATAR_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Default channel avatar">
+  <rect width="96" height="96" rx="24" fill="#243b36"/>
+  <path d="M29 26l45 22-45 22z" fill="#f6cf7a"/>
+</svg>"""
 
 
 def normalize_name(name: str) -> str:
@@ -96,6 +107,21 @@ def get_playlist_or_404(session: Session, channel_id: str, playlist_id: str) -> 
 def ensure_channel_owner(channel: Channel, current_user: CurrentUser) -> None:
     if channel.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the channel creator can manage this channel")
+
+
+def channel_avatar_path(storage_key: str) -> Path:
+    return settings.DATA_PATH / "channel_avatars" / storage_key
+
+
+def placeholder_channel_avatar_response() -> Response:
+    return Response(content=DEFAULT_CHANNEL_AVATAR_SVG, media_type="image/svg+xml")
+
+
+def validate_channel_avatar_upload(avatar: UploadFile) -> None:
+    if not avatar.filename:
+        raise HTTPException(status_code=400, detail="Avatar filename is required")
+    if not avatar.content_type or not avatar.content_type.startswith("image/"):
+        raise HTTPException(status_code=415, detail="Only image avatars are supported")
 
 
 def channel_to_public(
@@ -324,6 +350,95 @@ async def change_channel(
     return channel_to_public(session, channel, current_user)
 
 
+@router.put("/{channel_id}/avatar/", response_model=ChannelAvatarPublic)
+async def set_channel_avatar(
+    channel_id: str,
+    request: Request,
+    avatar: Annotated[UploadFile, File()],
+    session: Session = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> ChannelAvatar:
+    await enforce_rate_limit("channel_avatar_upload_user", f"user:{current_user.id}", 20, 3600)
+    channel = get_channel_or_404(session, channel_id)
+    ensure_channel_owner(channel, current_user)
+    validate_channel_avatar_upload(avatar)
+
+    content = await avatar.read(settings.MAX_CHANNEL_AVATAR_SIZE_BYTES + 1)
+    if len(content) > settings.MAX_CHANNEL_AVATAR_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="Channel avatar is too large")
+
+    avatar_directory = settings.DATA_PATH / "channel_avatars"
+    avatar_directory.mkdir(parents=True, exist_ok=True)
+    stored_avatar = session.get(ChannelAvatar, channel_id)
+    previous_path = channel_avatar_path(stored_avatar.storage_key) if stored_avatar else None
+    storage_key = f"{channel_id}-{uuid4().hex}"
+    storage_path = channel_avatar_path(storage_key)
+    storage_path.write_bytes(content)
+    now = utc_now()
+
+    if stored_avatar:
+        stored_avatar.storage_key = storage_key
+        stored_avatar.content_type = avatar.content_type or "application/octet-stream"
+        stored_avatar.size_bytes = len(content)
+        stored_avatar.updated_at = now
+    else:
+        stored_avatar = ChannelAvatar(
+            channel_id=channel_id,
+            storage_key=storage_key,
+            content_type=avatar.content_type or "application/octet-stream",
+            size_bytes=len(content),
+            created_at=now,
+            updated_at=now,
+        )
+
+    try:
+        session.add(stored_avatar)
+        session.commit()
+    except Exception:
+        session.rollback()
+        storage_path.unlink(missing_ok=True)
+        raise
+
+    if previous_path:
+        previous_path.unlink(missing_ok=True)
+    session.refresh(stored_avatar)
+    return stored_avatar
+
+
+@router.get("/{channel_id}/avatar/image/")
+async def download_channel_avatar(
+    channel_id: str,
+    session: Session = Depends(get_session),
+) -> Response:
+    get_channel_or_404(session, channel_id)
+    avatar = session.get(ChannelAvatar, channel_id)
+    if not avatar:
+        return placeholder_channel_avatar_response()
+
+    file_path = channel_avatar_path(avatar.storage_key)
+    if not file_path.exists():
+        return placeholder_channel_avatar_response()
+    return Response(content=file_path.read_bytes(), media_type=avatar.content_type)
+
+
+@router.delete("/{channel_id}/avatar/", response_model=DeleteResponse)
+async def delete_channel_avatar(
+    channel_id: str,
+    session: Session = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> DeleteResponse:
+    channel = get_channel_or_404(session, channel_id)
+    ensure_channel_owner(channel, current_user)
+    avatar = session.get(ChannelAvatar, channel_id)
+    if not avatar:
+        raise HTTPException(status_code=404, detail="Channel avatar not found")
+
+    channel_avatar_path(avatar.storage_key).unlink(missing_ok=True)
+    session.delete(avatar)
+    session.commit()
+    return DeleteResponse(message="Channel avatar deleted successfully")
+
+
 @router.delete("/{channel_id}", response_model=DeleteResponse)
 async def delete_channel(
     channel_id: str,
@@ -339,6 +454,10 @@ async def delete_channel(
         session.delete(playlist)
     session.exec(delete(ChannelSubscription).where(ChannelSubscription.channel_id == channel_id))
     session.exec(delete(ChannelVideo).where(ChannelVideo.channel_id == channel_id))
+    avatar = session.get(ChannelAvatar, channel_id)
+    if avatar:
+        channel_avatar_path(avatar.storage_key).unlink(missing_ok=True)
+        session.delete(avatar)
     session.delete(channel)
     session.commit()
     return DeleteResponse(message="Channel deleted successfully")

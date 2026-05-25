@@ -2,6 +2,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from basicvids_channels.schemas.channels import (
     Channel,
+    ChannelAvatar,
     ChannelPlaylist,
     ChannelPlaylistItem,
     ChannelSubscription,

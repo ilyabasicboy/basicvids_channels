@@ -24,6 +24,15 @@ class Channel(SQLModel, table=True):
     updated_at: datetime = Field(sa_type=DateTime(timezone=True), default_factory=utc_now, nullable=False)
 
 
+class ChannelAvatar(SQLModel, table=True):
+    channel_id: str = Field(foreign_key="channel.id", primary_key=True)
+    storage_key: str = Field(unique=True, max_length=500)
+    content_type: str = Field(max_length=100)
+    size_bytes: int = Field(ge=0)
+    created_at: datetime = Field(sa_type=DateTime(timezone=True), default_factory=utc_now, nullable=False)
+    updated_at: datetime = Field(sa_type=DateTime(timezone=True), default_factory=utc_now, nullable=False)
+
+
 class ChannelSubscription(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("channel_id", "user_id", name="uq_channel_subscription_channel_user"),)
 

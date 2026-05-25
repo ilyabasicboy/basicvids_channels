@@ -1,13 +1,19 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 from sqlmodel import Session, delete, select
 import httpx
 import pytest
 
 from basicvids_channels.auth import CurrentUser, get_current_user
-from basicvids_channels.schemas.channels import Channel, ChannelPlaylist, ChannelPlaylistItem, ChannelSubscription, ChannelVideo
+from basicvids_channels.schemas.channels import Channel, ChannelAvatar, ChannelPlaylist, ChannelPlaylistItem, ChannelSubscription, ChannelVideo
+from basicvids_channels.settings import settings
 from basicvids_channels.tests import app, engine
 
 
 pytestmark = pytest.mark.anyio
+temporary_directory = TemporaryDirectory()
+settings.DATA_PATH = Path(temporary_directory.name)
 
 
 async def request(method: str, url: str, **kwargs):
@@ -45,8 +51,13 @@ class BaseTestChannels:
             session.exec(delete(ChannelPlaylist))
             session.exec(delete(ChannelSubscription))
             session.exec(delete(ChannelVideo))
+            session.exec(delete(ChannelAvatar))
             session.exec(delete(Channel))
             session.commit()
+        avatar_directory = settings.DATA_PATH / "channel_avatars"
+        if avatar_directory.exists():
+            for file_path in avatar_directory.iterdir():
+                file_path.unlink()
 
     async def create_channel(self, name: str = "Creator channel") -> dict:
         response = await request("POST", self.method_url, json={"name": name, "description": "About channel"})
@@ -88,6 +99,59 @@ class TestChannels(BaseTestChannels):
         response = await request("PATCH", f"{self.method_url}{channel['id']}", json={"name": "Changed"})
 
         assert response.status_code == 403
+
+    async def test_owner_can_upload_and_replace_channel_avatar(self):
+        channel = await self.create_channel()
+
+        response = await request(
+            "PUT",
+            f"{self.method_url}{channel['id']}/avatar/",
+            files={"avatar": ("channel.png", b"first-avatar", "image/png")},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["content_type"] == "image/png"
+
+        response = await request("GET", f"{self.method_url}{channel['id']}/avatar/image/")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert response.content == b"first-avatar"
+
+        response = await request(
+            "PUT",
+            f"{self.method_url}{channel['id']}/avatar/",
+            files={"avatar": ("channel.jpg", b"second-avatar", "image/jpeg")},
+        )
+
+        assert response.status_code == 200
+        assert len(list((settings.DATA_PATH / "channel_avatars").iterdir())) == 1
+
+        response = await request("GET", f"{self.method_url}{channel['id']}/avatar/image/")
+
+        assert response.headers["content-type"] == "image/jpeg"
+        assert response.content == b"second-avatar"
+
+    async def test_non_owner_cannot_change_channel_avatar(self):
+        channel = await self.create_channel()
+        set_current_user(user(user_id=2))
+
+        response = await request(
+            "PUT",
+            f"{self.method_url}{channel['id']}/avatar/",
+            files={"avatar": ("channel.png", b"avatar", "image/png")},
+        )
+
+        assert response.status_code == 403
+
+    async def test_missing_channel_avatar_returns_placeholder(self):
+        channel = await self.create_channel()
+
+        response = await request("GET", f"{self.method_url}{channel['id']}/avatar/image/")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/svg+xml"
+        assert "<svg" in response.text
 
     async def test_only_channel_owner_can_create_playlist(self):
         channel = await self.create_channel()
@@ -164,6 +228,11 @@ class TestChannels(BaseTestChannels):
         channel = await self.create_channel()
         playlist = await self.create_playlist(channel["id"])
         await request("POST", f"{self.method_url}{channel['id']}/playlists/{playlist['id']}/videos/video-123")
+        await request(
+            "PUT",
+            f"{self.method_url}{channel['id']}/avatar/",
+            files={"avatar": ("channel.png", b"avatar", "image/png")},
+        )
         set_current_user(user(user_id=2))
         await request("POST", f"{self.method_url}{channel['id']}/subscriptions/")
         set_current_user(user(user_id=1))
@@ -177,3 +246,5 @@ class TestChannels(BaseTestChannels):
             assert session.exec(select(ChannelPlaylistItem)).all() == []
             assert session.exec(select(ChannelSubscription)).all() == []
             assert session.exec(select(ChannelVideo)).all() == []
+            assert session.exec(select(ChannelAvatar)).all() == []
+        assert list((settings.DATA_PATH / "channel_avatars").iterdir()) == []
